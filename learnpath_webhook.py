@@ -4,7 +4,10 @@ import os
 
 app = Flask(__name__)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6Kgu7VIO_ioiLeSzJ2JvxOEytJ244KZ83cMYX_A2EB9eQ")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY environment variable is not set!")
 ML_API_URL = "https://learnpath-api-u92e.onrender.com/predict/bulk"
 
 COURSES = [
