@@ -195,23 +195,6 @@ def generate_career_path(session):
     return call_gemini(prompt)
 
 
-def generate_short_summary(session):
-    name = session.get("name", "Student")
-    goal = session.get("goal", "Digital Leadership")
-    career_path = session.get("career_path", "")
-
-    prompt = (
-        f"A student named {name} with goal '{goal}' "
-        f"has this career path:\n\n{career_path}\n\n"
-        "Give a SHORT 2-3 line summary of their top 3 priority modules only.\n"
-        "End with exactly this line: "
-        "'Ask me WHY any module is recommended or for ALTERNATIVES!'\n"
-        "Keep total response under 300 characters strictly.\n"
-        "No bullet points. Plain sentences only."
-    )
-
-    return call_gemini(prompt)
-
 
 @app.route("/initialize", methods=["POST"])
 def initialize():
@@ -282,16 +265,12 @@ def webhook():
 
         if intent == "AskCareerPath":
             if session.get("career_path"):
-                # Return short summary for Dialogflow
-                # Full path already sent to frontend via /initialize
-                short_summary = generate_short_summary(session)
-                return jsonify({"fulfillmentText": short_summary})
+                return jsonify({"fulfillmentText": session["career_path"]})
             elif session.get("goal"):
                 career_path = generate_career_path(session)
                 session["career_path"] = career_path
                 sessions[session_id] = session
-                short_summary = generate_short_summary(session)
-                return jsonify({"fulfillmentText": short_summary})
+                return jsonify({"fulfillmentText": career_path})
             else:
                 return jsonify({
                     "fulfillmentText": (
