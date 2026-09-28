@@ -84,31 +84,63 @@ sessions = {}
 
 
 def call_gemini(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1000}
-    }
-    resp = requests.post(url, json=payload)
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+    # Try these models in order until one works
+    models = [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-latest",
+        "gemini-2.5-pro",
+        "gemini-pro-latest"
+    ]
+    last_error = ""
+    for model in models:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1000}
+            }
+            resp = requests.post(url, json=payload, timeout=30)
+            data = resp.json()
+            # Check if valid response
+            if "candidates" in data:
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            # If error returned
+            elif "error" in data:
+                last_error = data["error"].get("message", "Unknown error")
+                continue
+        except Exception as e:
+            last_error = str(e)
+            continue
+    # All models failed
+    return f"Career path generation temporarily unavailable. Error: {last_error}"
 
 
 def get_skill_levels(scores):
     if not scores:
         return []
-    students = [
-        {
-            "score": s["score"],
-            "attendance": s["attendance"],
-            "attempts": s.get("attempts", 2)
-        }
-        for s in scores
-    ]
-    resp = requests.post(ML_API_URL, json={"students": students})
-    results = resp.json().get("results", [])
-    for i, r in enumerate(results):
-        scores[i]["skill_level"] = r["prediction"]
+    try:
+        students = [
+            {
+                "score": s["score"],
+                "attendance": s["attendance"],
+                "attempts": s.get("attempts", 2)
+            }
+            for s in scores
+        ]
+        resp = requests.post(ML_API_URL, json={"students": students}, timeout=30)
+        if resp.status_code == 200 and resp.text.strip():
+            results = resp.json().get("results", [])
+            for i, r in enumerate(results):
+                if i < len(scores):
+                    scores[i]["skill_level"] = r["prediction"]
+        else:
+            # ML API sleeping or unavailable — assign Medium as default
+            for s in scores:
+                s["skill_level"] = "Medium"
+    except Exception:
+        # If ML API fails for any reason — assign Medium as default
+        for s in scores:
+            s["skill_level"] = "Medium"
     return scores
 
 
