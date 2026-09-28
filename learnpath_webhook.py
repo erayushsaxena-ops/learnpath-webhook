@@ -258,6 +258,7 @@ def webhook():
         data = request.get_json()
         intent = data["queryResult"]["intent"]["displayName"]
         parameters = data["queryResult"].get("parameters", {})
+        query_text = data["queryResult"].get("queryText", "")
         session_id = data["session"].split("/")[-1]
         session = sessions.get(session_id, {})
 
@@ -294,7 +295,8 @@ def webhook():
             prompt = (
                 f"Student {name} with goal '{goal}' received this career path:\n\n"
                 f"{career_path}\n\n"
-                "They ask WHY a course is recommended.\n"
+                f"The student specifically asked: '{query_text}'\n\n"
+                "Answer their specific question directly.\n"
                 "Explain in simple motivating language (max 150 words) "
                 "why the sequencing makes sense for their goal.\n"
                 "Be specific, clear and encouraging."
@@ -324,7 +326,8 @@ def webhook():
                 f"Student {name} with goal '{goal}' received this career path:\n\n"
                 f"{career_path}\n\n"
                 f"Available modules:\n{course_list}\n\n"
-                "They want alternative paths or to swap/skip modules.\n"
+                f"The student specifically asked: '{query_text}'\n\n"
+                "Answer their specific question directly.\n"
                 "Suggest 1-2 alternatives in max 150 words.\n"
                 "Be honest about tradeoffs. Be friendly and supportive."
             )
