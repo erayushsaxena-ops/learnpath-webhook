@@ -97,7 +97,7 @@ def call_gemini(prompt):
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1000}
+                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2000}
             }
             resp = requests.post(url, json=payload, timeout=30)
             data = resp.json()
