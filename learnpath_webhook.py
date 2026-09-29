@@ -430,16 +430,27 @@ def webhook():
                     )
                 })
 
+            prereq_context = (
+                "Module prerequisite order for context: "
+                "M1 > M2 > M3 > M4 (M3 needed first); "
+                "M2 > M5 > M6 (M5 needed first); "
+                "M2 > M5 > M7 > M8; "
+                "M9 and M10 always last."
+            )
+
             prompt = (
                 f"You are a learning advisor for IIT-K CDAIO programme.\n"
                 f"Student: {name}, Career Goal: {goal}.\n\n"
-                f"Their actual performance data:\n{performance}\n\n"
-                f"Their recommended career path:\n{career_path[:400]}\n\n"
+                f"Student performance (score, attendance, attempts):\n{performance}\n\n"
+                f"Their full recommended career path:\n{career_path}\n\n"
+                f"Module prerequisites: {prereq_context}\n\n"
                 f"Student's question: '{query_text}'\n\n"
-                "Answer using their ACTUAL scores and attendance. "
-                "Reference specific modules by name and their exact scores. "
-                "Explain why the sequencing makes sense given their performance. "
-                "Max 120 words. Be specific, data-driven and encouraging."
+                "Answer their SPECIFIC question directly. "
+                "If asking why one module is before another, explain BOTH: "
+                "(1) the prerequisite dependency reason if applicable, "
+                "(2) their actual scores/attendance that influenced placement. "
+                "Be specific — name the modules and cite the actual scores. "
+                "Max 130 words. Friendly and clear."
             )
 
             return jsonify({"fulfillmentText": call_gemini(prompt)})
