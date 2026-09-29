@@ -316,6 +316,21 @@ def webhook():
         session_id = data["session"].split("/")[-1]
         session = sessions.get(session_id, {})
 
+        # If session is missing (Render restarted), rebuild from frontend context
+        student_context = data.get("studentContext", {})
+        if student_context and not session.get("career_path"):
+            # Restore session from frontend-passed context
+            if not session:
+                session = {}
+            if student_context.get("name") and not session.get("name"):
+                session["name"] = student_context["name"]
+            if student_context.get("goal") and not session.get("goal"):
+                session["goal"] = student_context["goal"]
+            if student_context.get("career_path") and not session.get("career_path"):
+                session["career_path"] = student_context["career_path"]
+            # Save restored session
+            sessions[session_id] = session
+
         if intent == "AskCareerPath":
             if session.get("career_path"):
                 return jsonify({"fulfillmentText": session["career_path"]})
