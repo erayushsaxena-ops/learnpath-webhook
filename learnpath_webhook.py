@@ -90,9 +90,7 @@ def call_gemini(prompt):
     # Try these models in order until one works
     models = [
         "gemini-2.5-flash",
-        "gemini-2.5-flash-latest",
-        "gemini-2.5-pro",
-        "gemini-pro-latest"
+        "gemini-flash-latest"
     ]
     last_error = ""
     for model in models:
