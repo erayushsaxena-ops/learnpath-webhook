@@ -275,13 +275,15 @@ def generate_career_path(session):
         "2. Prioritize Weak areas critical for their goal\n"
         "3. Leverage Strong areas for advanced application\n"
         "4. Recommend module sequence with clear reasoning\n\n"
-        "Format:\n"
-        f"- Start with 2 line personalized summary for {name}\n"
-        "- Show recommended module sequence with emoji numbers\n"
-        "- One line per module explaining WHY it fits their goal\n"
-        "- End with encouraging closing message\n"
-        "- Keep under 350 words\n"
-        "- Be friendly, specific and motivating"
+        "Format — follow exactly:\n"
+        f"Start with 1 line personalized intro for {name}.\n"
+        "Then for each module use EXACTLY this format:\n"
+        "[number] Module [id]: [module name]\n"
+        "Why it fits: [one line reason referencing their actual score]\n"
+        "\n"
+        "End with 1 encouraging closing line.\n"
+        "No markdown bold (**), no asterisks (*), no bullet points.\n"
+        "Keep under 300 words. Be specific about their scores."
     )
 
     return call_gemini(prompt)
@@ -479,6 +481,34 @@ def webhook():
             career_path = generate_career_path(session)
             sessions[session_id]["career_path"] = career_path
             return jsonify({"fulfillmentText": career_path})
+
+        elif intent == "InstructorQuery":
+            # Instructor chatbot — gets full class data and answers with Gemini
+            class_data  = data.get("classData", {})
+            query_text_inst = data.get("queryText", query_text)
+
+            students_summary = class_data.get("studentsSummary", "No student data provided.")
+            catalog_summary  = class_data.get("catalogSummary",  "No catalog data provided.")
+            insights_summary = class_data.get("insightsSummary", "No insights provided.")
+
+            prompt = (
+                "You are an AI teaching assistant for the IIT-K CDAIO Executive Programme "
+                "on Digital Transformation.\n\n"
+                f"CLASS DATA:\n{students_summary}\n\n"
+                f"REFERENCE MATERIALS IN CATALOG:\n{catalog_summary}\n\n"
+                f"CLASS INSIGHTS:\n{insights_summary}\n\n"
+                f"INSTRUCTOR'S QUESTION: '{query_text_inst}'\n\n"
+                "Instructions:\n"
+                "1. Answer the instructor's specific question using the class data above.\n"
+                "2. Be specific — name students, modules, scores, and percentages.\n"
+                "3. Provide reasoning, not just lists.\n"
+                "4. Suggest actionable next steps where relevant.\n"
+                "5. Reference instructor materials from the catalog when relevant.\n"
+                "6. Keep response under 200 words. Use bullet points for clarity.\n"
+                "7. Be professional and direct."
+            )
+
+            return jsonify({"fulfillmentText": call_gemini(prompt)})
 
         else:
             return jsonify({
