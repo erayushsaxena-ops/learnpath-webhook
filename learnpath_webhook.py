@@ -219,6 +219,26 @@ def get_skill_levels(scores):
     return scores
 
 
+def build_performance_summary(scores):
+    """Build a concise performance summary from scores array."""
+    if not scores:
+        return "No scores available."
+    lines = []
+    for s in scores:
+        name     = s.get("course_name", "Unknown")
+        score    = s.get("score", "N/A")
+        attend   = s.get("attendance", "Unknown")
+        attempts = s.get("attempts", "N/A")
+        level    = s.get("skill_level", "Medium")
+        lines.append(
+            f"- {name}: Score {score}/100, "
+            f"Attendance {attend}, "
+            f"Attempts {attempts}, "
+            f"Skill Level: {level}"
+        )
+    return "\n".join(lines)
+
+
 def generate_career_path(session):
     name = session.get("name", "Student")
     goal = session.get("goal", "Digital Leadership")
@@ -369,9 +389,11 @@ def webhook():
 
         elif intent == "AskWhy":
             # Get from session first, then fall back to studentContext
-            career_path = session.get("career_path", "") or student_context.get("career_path", "")
-            goal = session.get("goal", "") or student_context.get("goal", "your career goal")
-            name = session.get("name", "") or student_context.get("name", "there")
+            career_path  = session.get("career_path", "") or student_context.get("career_path", "")
+            goal         = session.get("goal", "") or student_context.get("goal", "your career goal")
+            name         = session.get("name", "") or student_context.get("name", "there")
+            scores       = session.get("scores", [])
+            performance  = build_performance_summary(scores)
 
             if not career_path:
                 return jsonify({
@@ -381,22 +403,27 @@ def webhook():
                     )
                 })
 
-            # Short focused prompt — fewer tokens = faster Gemini response
             prompt = (
-                f"You are a learning advisor. "
-                f"Student: {name}, Goal: {goal}.\n"
-                f"Their question: '{query_text}'\n"
-                f"Their career path summary: {career_path[:500]}\n\n"
-                "Answer in max 100 words. Be specific and encouraging."
+                f"You are a learning advisor for IIT-K CDAIO programme.\n"
+                f"Student: {name}, Career Goal: {goal}.\n\n"
+                f"Their actual performance data:\n{performance}\n\n"
+                f"Their recommended career path:\n{career_path[:400]}\n\n"
+                f"Student's question: '{query_text}'\n\n"
+                "Answer using their ACTUAL scores and attendance. "
+                "Reference specific modules by name and their exact scores. "
+                "Explain why the sequencing makes sense given their performance. "
+                "Max 120 words. Be specific, data-driven and encouraging."
             )
 
             return jsonify({"fulfillmentText": call_gemini(prompt)})
 
         elif intent == "AskAlternative":
             # Get from session first, then fall back to studentContext
-            career_path = session.get("career_path", "") or student_context.get("career_path", "")
-            goal = session.get("goal", "") or student_context.get("goal", "your career goal")
-            name = session.get("name", "") or student_context.get("name", "there")
+            career_path  = session.get("career_path", "") or student_context.get("career_path", "")
+            goal         = session.get("goal", "") or student_context.get("goal", "your career goal")
+            name         = session.get("name", "") or student_context.get("name", "there")
+            scores       = session.get("scores", [])
+            performance  = build_performance_summary(scores)
 
             if not career_path:
                 return jsonify({
@@ -406,15 +433,18 @@ def webhook():
                     )
                 })
 
-            # Short focused prompt — fewer tokens = faster Gemini response
             course_names = ", ".join([c['module'] for c in COURSES])
             prompt = (
-                f"You are a learning advisor. "
-                f"Student: {name}, Goal: {goal}.\n"
-                f"Their question: '{query_text}'\n"
-                f"Current path summary: {career_path[:400]}\n"
+                f"You are a learning advisor for IIT-K CDAIO programme.\n"
+                f"Student: {name}, Career Goal: {goal}.\n\n"
+                f"Their actual performance data:\n{performance}\n\n"
+                f"Current recommended path:\n{career_path[:400]}\n\n"
                 f"Available modules: {course_names}\n\n"
-                "Suggest 1-2 alternatives in max 100 words with tradeoffs. Be friendly."
+                f"Student's question: '{query_text}'\n\n"
+                "Answer using their ACTUAL scores and attendance. "
+                "Reference specific module names and scores when suggesting alternatives. "
+                "Suggest 1-2 alternatives with honest tradeoffs based on their performance. "
+                "Max 120 words. Be friendly and data-driven."
             )
 
             return jsonify({"fulfillmentText": call_gemini(prompt)})
