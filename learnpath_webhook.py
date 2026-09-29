@@ -125,14 +125,14 @@ def call_gemini(prompt):
     
     for model in models:
         print(f"Trying model: {model}")
-        max_attempts = 3
+        max_attempts = 2  # Reduced from 3 to stay within gunicorn timeout
         model_failed = False
         
         for attempt in range(max_attempts):
             try:
                 # Wait before retry (not before first attempt)
                 if attempt > 0:
-                    wait_time = attempt * 15
+                    wait_time = 5  # Reduced from 15s to 5s to avoid worker timeout
                     print(f"  Retry {attempt}/{max_attempts-1} — waiting {wait_time}s...")
                     time.sleep(wait_time)
                 
