@@ -87,33 +87,86 @@ sessions = {}
 
 
 def call_gemini(prompt):
-    # Try these models in order until one works
+    import time
+    # All free tier Gemini models — tried in order
+    # If one fails or is overloaded, next one is tried
     models = [
-        "gemini-2.5-flash",
-        "gemini-flash-latest"
+        "gemini-2.5-flash",       # Primary — best free model
+        "gemini-flash-latest",    # Fallback 1
+        "gemini-2.5-flash-lite",  # Fallback 2 — lighter, faster
+        "gemini-flash-lite-latest" # Fallback 3 — last resort
     ]
-    last_error = ""
+    retry_words = [
+        "high demand", "quota", "rate", "limit",
+        "retry", "overload", "unavailable", "busy",
+        "capacity", "try again", "resource"
+    ]
+    
     for model in models:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-            payload = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2000}
-            }
-            resp = requests.post(url, json=payload, timeout=30)
-            data = resp.json()
-            # Check if valid response
-            if "candidates" in data:
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-            # If error returned
-            elif "error" in data:
-                last_error = data["error"].get("message", "Unknown error")
-                continue
-        except Exception as e:
-            last_error = str(e)
+        print(f"Trying model: {model}")
+        max_attempts = 3
+        model_failed = False
+        
+        for attempt in range(max_attempts):
+            try:
+                # Wait before retry (not before first attempt)
+                if attempt > 0:
+                    wait_time = attempt * 15
+                    print(f"  Retry {attempt}/{max_attempts-1} — waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+                payload = {
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2000}
+                }
+                resp = requests.post(url, json=payload, timeout=60)
+                data = resp.json()
+                
+                # ✅ Success
+                if "candidates" in data:
+                    print(f"  Success with {model}!")
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                
+                # ❌ Error from Gemini
+                elif "error" in data:
+                    error_msg = data["error"].get("message", "")
+                    error_code = data["error"].get("code", 0)
+                    print(f"  Error from {model}: {error_msg[:80]}")
+                    
+                    # Model not found or not available — skip to next model
+                    if error_code in [404, 400] or 'not found' in error_msg.lower():
+                        print(f"  Model {model} not available — trying next model")
+                        model_failed = True
+                        break
+                    
+                    # Retryable error — wait and retry same model
+                    if any(x in error_msg.lower() for x in retry_words):
+                        if attempt < max_attempts - 1:
+                            continue
+                        else:
+                            # All retries used — move to next model
+                            print(f"  All retries failed for {model} — trying next model")
+                            model_failed = True
+                            break
+                    else:
+                        # Unknown error — try next model
+                        model_failed = True
+                        break
+            
+            except Exception as e:
+                print(f"  Exception: {str(e)[:80]}")
+                if attempt < max_attempts - 1:
+                    time.sleep(10)
+                    continue
+                model_failed = True
+                break
+        
+        if model_failed:
             continue
+    
     # All models failed
-    return f"Career path generation temporarily unavailable. Error: {last_error}"
+    return "I apologize, I am temporarily unable to generate a response. Please try again in a moment."
 
 
 def get_skill_levels(scores):
