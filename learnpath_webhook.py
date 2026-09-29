@@ -4,7 +4,7 @@ import os
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)  # Allow all browser origins
+CORS(app, origins="*", allow_headers="*", methods=["GET", "POST", "OPTIONS"])
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
@@ -86,6 +86,25 @@ COURSES = [
 ]
 
 sessions = {}
+
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"]  = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
+
+@app.route("/initialize", methods=["OPTIONS"])
+@app.route("/webhook", methods=["OPTIONS"])
+@app.route("/", methods=["OPTIONS"])
+def handle_options():
+    response = app.make_default_options_response()
+    response.headers["Access-Control-Allow-Origin"]  = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
 
 
 def call_gemini(prompt):
@@ -349,9 +368,10 @@ def webhook():
                 })
 
         elif intent == "AskWhy":
-            career_path = session.get("career_path", "")
-            goal = session.get("goal", "your career goal")
-            name = session.get("name", "there")
+            # Get from session first, then fall back to studentContext
+            career_path = session.get("career_path", "") or student_context.get("career_path", "")
+            goal = session.get("goal", "") or student_context.get("goal", "your career goal")
+            name = session.get("name", "") or student_context.get("name", "there")
 
             if not career_path:
                 return jsonify({
@@ -361,22 +381,22 @@ def webhook():
                     )
                 })
 
+            # Short focused prompt — fewer tokens = faster Gemini response
             prompt = (
-                f"Student {name} with goal '{goal}' received this career path:\n\n"
-                f"{career_path}\n\n"
-                f"The student specifically asked: '{query_text}'\n\n"
-                "Answer their specific question directly.\n"
-                "Explain in simple motivating language (max 150 words) "
-                "why the sequencing makes sense for their goal.\n"
-                "Be specific, clear and encouraging."
+                f"You are a learning advisor. "
+                f"Student: {name}, Goal: {goal}.\n"
+                f"Their question: '{query_text}'\n"
+                f"Their career path summary: {career_path[:500]}\n\n"
+                "Answer in max 100 words. Be specific and encouraging."
             )
 
             return jsonify({"fulfillmentText": call_gemini(prompt)})
 
         elif intent == "AskAlternative":
-            career_path = session.get("career_path", "")
-            goal = session.get("goal", "your career goal")
-            name = session.get("name", "there")
+            # Get from session first, then fall back to studentContext
+            career_path = session.get("career_path", "") or student_context.get("career_path", "")
+            goal = session.get("goal", "") or student_context.get("goal", "your career goal")
+            name = session.get("name", "") or student_context.get("name", "there")
 
             if not career_path:
                 return jsonify({
@@ -386,19 +406,15 @@ def webhook():
                     )
                 })
 
-            course_list = "\n".join([
-                f"Module {c['id']}: {c['module']} - {c['description']}"
-                for c in COURSES
-            ])
-
+            # Short focused prompt — fewer tokens = faster Gemini response
+            course_names = ", ".join([c['module'] for c in COURSES])
             prompt = (
-                f"Student {name} with goal '{goal}' received this career path:\n\n"
-                f"{career_path}\n\n"
-                f"Available modules:\n{course_list}\n\n"
-                f"The student specifically asked: '{query_text}'\n\n"
-                "Answer their specific question directly.\n"
-                "Suggest 1-2 alternatives in max 150 words.\n"
-                "Be honest about tradeoffs. Be friendly and supportive."
+                f"You are a learning advisor. "
+                f"Student: {name}, Goal: {goal}.\n"
+                f"Their question: '{query_text}'\n"
+                f"Current path summary: {career_path[:400]}\n"
+                f"Available modules: {course_names}\n\n"
+                "Suggest 1-2 alternatives in max 100 words with tradeoffs. Be friendly."
             )
 
             return jsonify({"fulfillmentText": call_gemini(prompt)})
