@@ -139,7 +139,7 @@ def call_gemini(prompt):
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
                 payload = {
                     "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2000}
+                    "generationConfig": {"temperature": 0.7, "maxOutputTokens": 8000}
                 }
                 resp = requests.post(url, json=payload, timeout=60)
                 data = resp.json()
@@ -242,80 +242,43 @@ def build_performance_summary(scores):
 def generate_career_path(session):
     name       = session.get("name", "Student")
     goal       = session.get("goal", "Digital Leadership")
-    short_term = session.get("short_term_goal", "Not specified")
-    long_term  = session.get("long_term_goal", "Not specified")
+    short_term = session.get("short_term_goal", "")
+    long_term  = session.get("long_term_goal", "")
     scores     = session.get("scores", [])
 
-    # Build detailed per-module student data with urgency labels
-    skill_lines = []
+    # Compact score summary
+    lines = []
     for s in scores:
-        score    = s.get("score", 0)
-        att      = s.get("attendance", "Present")
-        attempts = s.get("attempts", 1)
-        level    = s.get("skill_level", "Medium")
-        urgency  = "URGENT" if score < 55 or att == "Absent" else                    "REINFORCE" if score < 75 else "STRONG"
-        skill_lines.append(
-            f"- {s['course_name']}: Score {score}/100, "
-            f"Attendance {att}, Attempts {attempts}, "
-            f"Level {level} [{urgency}]"
-        )
-    skill_summary = "\n".join(skill_lines) if skill_lines else "No scores provided"
-
-    module_prereqs = (
-        "M1 Understanding Digital Transformation [Beginner] - Foundation. No prerequisites. Must come before M2.\n"
-        "M2 Decoding Digital Transformation [Beginner-Intermediate] - Requires M1. Unlocks M3, M5, M6.\n"
-        "M3 Data Driven Enterprise Transformation [Intermediate] - Requires M2. Needed before M4 (data fuels AI).\n"
-        "M4 Building an Intelligent Organization [Advanced] - Requires M3 AND M2. Most complex — do last among core.\n"
-        "M5 Tech Behind Digital Transformation [Intermediate] - Requires M2. Supports M4 and M6.\n"
-        "M6 Digital Transformation of Functions [Intermediate] - Requires M2 and M5. Applies tech across business.\n"
-        "M7 Cybersecurity, Cyber and Tech Laws [Intermediate] - Requires M5. Must come before M8.\n"
-        "M8 Risk Compliance and Control [Intermediate] - Requires M7. Governance layer on top of cyber.\n"
-        "M9 Connecting the Dots [Advanced] - Requires ALL prior modules. Synthesis — must be second to last.\n"
-        "M10 Leadership in the Digital and AI Era [Advanced] - Final capstone. Always last."
-    )
-
-    sequencing_rules = (
-        "RULE 1 — PREREQUISITES OVERRIDE RISK LEVEL:\n"
-        "  Never place a module before its prerequisites, regardless of how urgent it is.\n"
-        "  If M5 is Weak but M2 is Strong, M2 still comes before M5 because M5 requires M2.\n"
-        "  If M7 is Weak but M5 is Medium, M5 still comes before M7 because M7 requires M5.\n"
-        "  A Medium or Strong prerequisite module is more important than a Weak module that depends on it.\n\n"
-        "RULE 2 — WITHIN VALID PREREQUISITE ORDER, PRIORITISE BY URGENCY:\n"
-        "  a. Prerequisite modules that must be fixed before urgent dependents can be tackled.\n"
-        "  b. URGENT modules (score < 55 OR Absent attendance) — critical gaps.\n"
-        "  c. REINFORCE modules (score 55-74) that are prerequisites of URGENT modules — fix these before the urgent ones.\n"
-        "  d. REINFORCE modules (score 55-74) — general reinforcement.\n"
-        "  e. STRONG modules (score 75+) — mention briefly, study last.\n\n"
-        "RULE 3 — GOAL ALIGNMENT:\n"
-        "  Within the same urgency tier, modules aligned to the student's career goal come first.\n\n"
-        "RULE 4 — FIXED POSITIONS:\n"
-        "  M9 and M10 always go last. They synthesize everything and have all modules as prerequisites."
-    )
+        sc  = s.get("score", 0)
+        att = s.get("attendance", "Present")
+        att_short = att[0]  # P or A
+        attempts  = s.get("attempts", 1)
+        lvl = "URGENT" if sc < 55 or att == "Absent" else "REINFORCE" if sc < 75 else "OK"
+        # Use short module name
+        short_name = s["course_name"].replace("Digital Transformation", "DT").replace("Transformation", "Trans")
+        lines.append(f"{short_name}: {sc}/100 {att_short} x{attempts} [{lvl}]")
+    skill_summary = "\n".join(lines)
 
     prompt = (
-        "You are an expert learning path advisor for the "
-        "IIT-K CDAIO Executive Programme on Digital Transformation.\n\n"
-        f"STUDENT: {name}\n"
-        f"CAREER GOAL: {goal}\n"
-        f"SHORT-TERM (1 year): {short_term}\n"
-        f"LONG-TERM (5 years): {long_term}\n\n"
-        f"STUDENT PERFORMANCE DATA (score, attendance, attempts per module):\n{skill_summary}\n\n"
-        f"MODULE PREREQUISITE MAP:\n{module_prereqs}\n\n"
-        f"SEQUENCING RULES (apply all four):\n{sequencing_rules}\n\n"
-        "FORMAT — follow EXACTLY. No markdown, asterisks, or bold.\n"
-        f"Write one intro line for {name}.\n"
+        f"You are a learning path advisor for IIT-K CDAIO Executive Programme.\n"
+        f"Student: {name} | Goal: {goal}\n"
+        f"Short-term: {short_term} | Long-term: {long_term}\n\n"
+        f"Performance (score/attendance/attempts/urgency):\n{skill_summary}\n\n"
+        "Module prerequisites:\n"
+        "M1(Understanding DT) -> M2(Decoding DT) -> M3(Data Driven) -> M4(Building Intelligent Org)\n"
+        "M2 -> M5(Tech Behind DT) -> M6(DT of Functions) -> M7(Cybersecurity) -> M8(Risk Compliance)\n"
+        "M9(Connecting Dots) and M10(Leadership) always LAST.\n\n"
+        "SEQUENCING LOGIC — apply in this order:\n"
+        "1. Prerequisites always come before their dependents — even if prerequisite score is OK/Strong.\n"
+        "   Example: M2 must precede M3 even if M2=Strong and M3=URGENT.\n"
+        "2. Within valid prerequisite order, put URGENT first, then REINFORCE, then OK.\n"
+        "3. M9 and M10 always last.\n\n"
+        "OUTPUT — list ALL 10 modules. Use this exact format for each:\n"
+        "<number> <Full Exact Module Name>\n"
+        "Why: <score, attendance, prerequisite reason in 1 line>\n"
         "\n"
-        "Then for ALL 10 modules, repeat this exact pattern:\n"
-        "<number> <Exact Module Name>\n"
-        "Why: <score/100, attendance, prerequisite reason>\n"
-        "\n"
-        "Write one closing line.\n"
-        "\n"
-        "RULES:\n"
-        "- Numbers 1 to 10. Do NOT write 'Module M1' or 'Module 1:' — just the digit and module name.\n"
-        "- Correct: '3 Data Driven Enterprise Transformation'\n"
-        "- Correct Why: 'Why: Score 40/100 Absent — most urgent; prereq for Building Intelligent Org.'\n"
-        "- Include ALL 10 modules. No skipping. Under 500 words."
+        f"Start with one intro line for {name}. End with one closing line.\n"
+        "NO markdown. NO asterisks. NO bold. ALL 10 modules required. Under 600 words."
     )
 
     return call_gemini(prompt)
