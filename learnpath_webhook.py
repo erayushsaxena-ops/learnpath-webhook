@@ -562,6 +562,241 @@ def webhook():
         }), 500
 
 
+@app.route("/chat", methods=["POST", "OPTIONS"])
+def chat():
+    """
+    Proxy endpoint — frontend calls this instead of Dialogflow directly.
+    This keeps Google credentials server-side, away from the browser.
+
+    Request body:
+    {
+      "session_id":     "student-USR001-123",
+      "message":        "Why is this module first?",
+      "student_context": {
+        "name":        "Ayush",
+        "goal":        "Chief AI Officer",
+        "career_path": "..."   // from /initialize response
+      }
+    }
+
+    Response:
+    {
+      "fulfillmentText": "...",
+      "intent":          "AskWhy",
+      "session_id":      "student-USR001-123"
+    }
+    """
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    try:
+        data        = request.get_json()
+        session_id  = data.get("session_id", "default-session")
+        message     = data.get("message", "")
+        student_ctx = data.get("student_context", {})
+
+        if not message:
+            return jsonify({"error": "message field is required"}), 400
+
+        # ── Read Dialogflow credentials from environment ──
+        project_id  = os.environ.get("DIALOGFLOW_PROJECT_ID", "")
+        df_key_json = os.environ.get("DIALOGFLOW_KEY_JSON", "")
+
+        if project_id and df_key_json:
+            # ── Call Dialogflow detectIntent via REST API ──
+            # Get access token using service account key
+            import json, time
+            import base64
+            import hmac, hashlib
+
+            try:
+                key_data   = json.loads(df_key_json)
+                token_url  = key_data.get("token_uri", "https://oauth2.googleapis.com/token")
+                client_email = key_data.get("client_email", "")
+                private_key  = key_data.get("private_key", "")
+
+                # Build JWT for Google OAuth
+                now       = int(time.time())
+                jwt_header  = base64.urlsafe_b64encode(
+                    json.dumps({"alg":"RS256","typ":"JWT"}).encode()
+                ).rstrip(b"=").decode()
+                jwt_payload = base64.urlsafe_b64encode(json.dumps({
+                    "iss":   client_email,
+                    "scope": "https://www.googleapis.com/auth/cloud-platform",
+                    "aud":   token_url,
+                    "exp":   now + 3600,
+                    "iat":   now
+                }).encode()).rstrip(b"=").decode()
+
+                # Sign with RSA — use cryptography library
+                from cryptography.hazmat.primitives import hashes, serialization
+                from cryptography.hazmat.primitives.asymmetric import padding
+
+                private_key_obj = serialization.load_pem_private_key(
+                    private_key.encode(), password=None
+                )
+                signing_input = f"{jwt_header}.{jwt_payload}".encode()
+                signature = private_key_obj.sign(
+                    signing_input, padding.PKCS1v15(), hashes.SHA256()
+                )
+                jwt_sig = base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+                jwt_token = f"{jwt_header}.{jwt_payload}.{jwt_sig}"
+
+                # Exchange JWT for access token
+                token_resp = requests.post(token_url, data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                    "assertion":  jwt_token
+                }, timeout=10)
+                access_token = token_resp.json().get("access_token", "")
+
+                # Call Dialogflow detectIntent
+                df_url = (
+                    f"https://dialogflow.googleapis.com/v2/projects/{project_id}"
+                    f"/agent/sessions/{session_id}:detectIntent"
+                )
+                df_resp = requests.post(df_url,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type":  "application/json"
+                    },
+                    json={
+                        "queryInput": {
+                            "text": {
+                                "text":         message,
+                                "languageCode": "en"
+                            }
+                        }
+                    },
+                    timeout=30
+                )
+                df_data      = df_resp.json()
+                query_result = df_data.get("queryResult", {})
+                intent_name  = query_result.get("intent", {}).get("displayName", "")
+                fulfillment  = query_result.get("fulfillmentText", "")
+
+                # If Dialogflow returned fulfillment text (from static intent response)
+                # and intent was handled without webhook, return it directly
+                if fulfillment and intent_name == "Welcome":
+                    return jsonify({
+                        "fulfillmentText": fulfillment,
+                        "intent":          intent_name,
+                        "session_id":      session_id
+                    })
+
+                # For all other intents, Dialogflow calls /webhook automatically
+                # and returns the fulfillmentText from webhook response
+                if fulfillment:
+                    return jsonify({
+                        "fulfillmentText": fulfillment,
+                        "intent":          intent_name,
+                        "session_id":      session_id
+                    })
+
+                # Fallback if Dialogflow did not return fulfillment
+                intent_name = intent_name or _detect_intent_locally(message)
+
+            except Exception as df_err:
+                print(f"Dialogflow call failed: {df_err} — falling back to local intent detection")
+                intent_name = _detect_intent_locally(message)
+
+        else:
+            # No Dialogflow credentials — use local intent detection
+            print("No Dialogflow credentials set — using local intent detection")
+            intent_name = _detect_intent_locally(message)
+
+        # ── Call /webhook handler directly with detected intent ──
+        synthetic_request = {
+            "queryResult": {
+                "intent":     {"displayName": intent_name},
+                "parameters": {},
+                "queryText":  message
+            },
+            "session":        f"projects/learnpath/agent/sessions/{session_id}",
+            "studentContext": student_ctx
+        }
+
+        # Reuse the webhook logic by calling it internally
+        return _handle_webhook_logic(synthetic_request)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _detect_intent_locally(message):
+    """Local intent detection — mirrors the HTML JS logic."""
+    lower = message.lower()
+
+    if any(p in lower for p in [
+        'career path', 'show my path', 'learning path',
+        'what should i study', 'study next', 'recommended path'
+    ]):
+        return 'AskCareerPath'
+
+    if any(p in lower for p in [
+        'alternative', 'skip', 'swap', 'instead',
+        'other option', 'can i take', 'replace', 'change the order'
+    ]):
+        return 'AskAlternative'
+
+    if any(p in lower for p in [
+        'why', 'how come', 'explain', 'inspite', 'despite',
+        'even though', 'above', 'below', 'before', 'after',
+        'first', 'last', 'placed', 'position', 'priority',
+        'ranked', 'sequence', 'order', 'recommend',
+        'higher', 'lower'
+    ]):
+        return 'AskWhy'
+
+    # Check if any module name is mentioned
+    module_names = [
+        'understanding digital', 'decoding digital', 'data driven',
+        'building an intelligent', 'tech behind', 'digital transformation of',
+        'cybersecurity', 'risk compliance', 'connecting the dots', 'leadership'
+    ]
+    if any(m in lower for m in module_names):
+        return 'AskWhy'
+
+    return 'AskWhy'  # Default to AskWhy rather than rejecting
+
+
+def _handle_webhook_logic(data):
+    """Internal webhook logic — shared between /webhook and /chat."""
+    try:
+        intent      = data["queryResult"]["intent"]["displayName"]
+        parameters  = data["queryResult"].get("parameters", {})
+        query_text  = data["queryResult"].get("queryText", "")
+        session_id  = data["session"].split("/")[-1]
+        session     = sessions.get(session_id, {})
+
+        student_context = data.get("studentContext", {})
+        if student_context and not session.get("career_path"):
+            if not session:
+                session = {}
+            if student_context.get("name") and not session.get("name"):
+                session["name"] = student_context["name"]
+            if student_context.get("goal") and not session.get("goal"):
+                session["goal"] = student_context["goal"]
+            if student_context.get("career_path") and not session.get("career_path"):
+                session["career_path"] = student_context["career_path"]
+            sessions[session_id] = session
+
+        # Import the webhook handler logic
+        # We replicate the intent handling here to avoid circular calls
+        import flask
+        with app.test_request_context(
+            '/webhook',
+            method='POST',
+            json=data,
+            content_type='application/json'
+        ):
+            # Call webhook function directly
+            response = webhook()
+            return response
+
+    except Exception as e:
+        return jsonify({"fulfillmentText": f"Error: {str(e)}"}), 500
+
+
 @app.route("/")
 def home():
     return jsonify({
