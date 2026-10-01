@@ -803,6 +803,24 @@ def _handle_webhook_logic(data):
         return jsonify({"fulfillmentText": f"Error: {str(e)}"}), 500
 
 
+@app.route("/debug-path", methods=["POST"])
+def debug_path():
+    """Debug endpoint — returns raw Gemini career path output."""
+    try:
+        data    = request.get_json()
+        session = {
+            "name":            data.get("name", "Test Student"),
+            "goal":            data.get("goal", "Chief AI Officer"),
+            "short_term_goal": data.get("short_term_goal", ""),
+            "long_term_goal":  data.get("long_term_goal", ""),
+            "scores":          data.get("scores", [])
+        }
+        raw = generate_career_path(session)
+        return jsonify({"raw": raw, "lines": raw.split("\n")})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/")
 def home():
     return jsonify({
