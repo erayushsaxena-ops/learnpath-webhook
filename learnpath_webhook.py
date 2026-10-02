@@ -535,24 +535,18 @@ def webhook():
 def chat():
     """
     Proxy endpoint — frontend calls this instead of Dialogflow directly.
-    This keeps Google credentials server-side, away from the browser.
+
+    HOW IT WORKS:
+    1. We call Dialogflow ONLY for intent detection (what did the student mean?)
+    2. We NEVER let Dialogflow call /webhook — that always times out (5s limit)
+    3. Once we know the intent, we call our own webhook logic directly
+    4. This means Gemini always runs and real answers always return
 
     Request body:
     {
-      "session_id":     "student-USR001-123",
-      "message":        "Why is this module first?",
-      "student_context": {
-        "name":        "Ayush",
-        "goal":        "Chief AI Officer",
-        "career_path": "..."   // from /initialize response
-      }
-    }
-
-    Response:
-    {
-      "fulfillmentText": "...",
-      "intent":          "AskWhy",
-      "session_id":      "student-USR001-123"
+      "session_id":      "student-USR001-123",
+      "message":         "Why is this module first?",
+      "student_context": { "name", "goal", "career_path" }
     }
     """
     if request.method == "OPTIONS":
@@ -567,27 +561,27 @@ def chat():
         if not message:
             return jsonify({"error": "message field is required"}), 400
 
-        # ── Read Dialogflow credentials from environment ──
         project_id  = os.environ.get("DIALOGFLOW_PROJECT_ID", "")
         df_key_json = os.environ.get("DIALOGFLOW_KEY_JSON", "")
 
-        if project_id and df_key_json:
-            # ── Call Dialogflow detectIntent via REST API ──
-            # Get access token using service account key
-            import json, time
-            import base64
-            import hmac, hashlib
+        # ── Step 1: Detect intent (Dialogflow if available, local otherwise) ──
+        intent_name = None
 
+        if project_id and df_key_json:
             try:
-                key_data   = json.loads(df_key_json)
-                token_url  = key_data.get("token_uri", "https://oauth2.googleapis.com/token")
+                import json, time, base64
+                from cryptography.hazmat.primitives import hashes, serialization
+                from cryptography.hazmat.primitives.asymmetric import padding
+
+                key_data     = json.loads(df_key_json)
+                token_url    = key_data.get("token_uri", "https://oauth2.googleapis.com/token")
                 client_email = key_data.get("client_email", "")
                 private_key  = key_data.get("private_key", "")
 
-                # Build JWT for Google OAuth
-                now       = int(time.time())
+                # Build JWT
+                now         = int(time.time())
                 jwt_header  = base64.urlsafe_b64encode(
-                    json.dumps({"alg":"RS256","typ":"JWT"}).encode()
+                    json.dumps({"alg": "RS256", "typ": "JWT"}).encode()
                 ).rstrip(b"=").decode()
                 jwt_payload = base64.urlsafe_b64encode(json.dumps({
                     "iss":   client_email,
@@ -597,29 +591,29 @@ def chat():
                     "iat":   now
                 }).encode()).rstrip(b"=").decode()
 
-                # Sign with RSA — use cryptography library
-                from cryptography.hazmat.primitives import hashes, serialization
-                from cryptography.hazmat.primitives.asymmetric import padding
-
                 private_key_obj = serialization.load_pem_private_key(
                     private_key.encode(), password=None
                 )
                 signing_input = f"{jwt_header}.{jwt_payload}".encode()
-                signature = private_key_obj.sign(
+                signature     = private_key_obj.sign(
                     signing_input, padding.PKCS1v15(), hashes.SHA256()
                 )
-                jwt_sig = base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
+                jwt_sig   = base64.urlsafe_b64encode(signature).rstrip(b"=").decode()
                 jwt_token = f"{jwt_header}.{jwt_payload}.{jwt_sig}"
 
                 # Exchange JWT for access token
-                token_resp = requests.post(token_url, data={
+                token_resp   = requests.post(token_url, data={
                     "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
                     "assertion":  jwt_token
                 }, timeout=10)
                 access_token = token_resp.json().get("access_token", "")
 
-                # Call Dialogflow detectIntent
-                df_url = (
+                # ── Call Dialogflow detectIntent for INTENT ONLY ──
+                # CRITICAL: We use the result only for intent_name.
+                # We NEVER use Dialogflow's fulfillmentText — it is just a placeholder.
+                # Dialogflow cannot call our webhook in time (5s limit vs our 6-30s response).
+                # We always call our own webhook logic after getting the intent.
+                df_url  = (
                     f"https://dialogflow.googleapis.com/v2/projects/{project_id}"
                     f"/agent/sessions/{session_id}:detectIntent"
                 )
@@ -630,50 +624,30 @@ def chat():
                     },
                     json={
                         "queryInput": {
-                            "text": {
-                                "text":         message,
-                                "languageCode": "en"
-                            }
+                            "text": {"text": message, "languageCode": "en"}
                         }
                     },
-                    timeout=30
+                    timeout=10  # Short timeout — we only need the intent name
                 )
-                df_data      = df_resp.json()
-                query_result = df_data.get("queryResult", {})
-                intent_name  = query_result.get("intent", {}).get("displayName", "")
-                fulfillment  = query_result.get("fulfillmentText", "")
+                df_data     = df_resp.json()
+                intent_name = (df_data
+                               .get("queryResult", {})
+                               .get("intent", {})
+                               .get("displayName", ""))
 
-                # If Dialogflow returned fulfillment text (from static intent response)
-                # and intent was handled without webhook, return it directly
-                if fulfillment and intent_name == "Welcome":
-                    return jsonify({
-                        "fulfillmentText": fulfillment,
-                        "intent":          intent_name,
-                        "session_id":      session_id
-                    })
-
-                # For all other intents, Dialogflow calls /webhook automatically
-                # and returns the fulfillmentText from webhook response
-                if fulfillment:
-                    return jsonify({
-                        "fulfillmentText": fulfillment,
-                        "intent":          intent_name,
-                        "session_id":      session_id
-                    })
-
-                # Fallback if Dialogflow did not return fulfillment
-                intent_name = intent_name or _detect_intent_locally(message)
+                print(f"Dialogflow detected intent: {intent_name}")
 
             except Exception as df_err:
-                print(f"Dialogflow call failed: {df_err} — falling back to local intent detection")
-                intent_name = _detect_intent_locally(message)
+                print(f"Dialogflow intent detection failed: {df_err} — using local detection")
+                intent_name = None
 
-        else:
-            # No Dialogflow credentials — use local intent detection
-            print("No Dialogflow credentials set — using local intent detection")
+        # ── Step 2: Fall back to local intent detection if needed ──
+        if not intent_name:
             intent_name = _detect_intent_locally(message)
+            print(f"Local intent detection: {intent_name}")
 
-        # ── Call /webhook handler directly with detected intent ──
+        # ── Step 3: Always call our own webhook logic directly ──
+        # This is the REAL response — Gemini-powered, no timeout issues.
         synthetic_request = {
             "queryResult": {
                 "intent":     {"displayName": intent_name},
@@ -684,11 +658,20 @@ def chat():
             "studentContext": student_ctx
         }
 
-        # Reuse the webhook logic by calling it internally
-        return _handle_webhook_logic(synthetic_request)
+        response = _handle_webhook_logic(synthetic_request)
+
+        # Add intent to response for debugging
+        try:
+            resp_data = response.get_json()
+            resp_data["intent"]     = intent_name
+            resp_data["session_id"] = session_id
+            return jsonify(resp_data)
+        except Exception:
+            return response
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e), "fulfillmentText": "Sorry, something went wrong. Please try again."}), 500
+
 
 
 def _detect_intent_locally(message):
@@ -729,41 +712,37 @@ def _detect_intent_locally(message):
 
 
 def _handle_webhook_logic(data):
-    """Internal webhook logic — shared between /webhook and /chat."""
+    """
+    Internal — calls the webhook handler directly without going through HTTP.
+    Used by /chat so we always get the real Gemini response,
+    bypassing Dialogflow's 5-second fulfillment timeout entirely.
+    """
     try:
-        intent      = data["queryResult"]["intent"]["displayName"]
-        parameters  = data["queryResult"].get("parameters", {})
-        query_text  = data["queryResult"].get("queryText", "")
-        session_id  = data["session"].split("/")[-1]
-        session     = sessions.get(session_id, {})
-
+        # Merge studentContext into session store so webhook has full context
+        session_id      = data.get("session", "").split("/")[-1]
         student_context = data.get("studentContext", {})
-        if student_context and not session.get("career_path"):
-            if not session:
-                session = {}
-            if student_context.get("name") and not session.get("name"):
-                session["name"] = student_context["name"]
-            if student_context.get("goal") and not session.get("goal"):
-                session["goal"] = student_context["goal"]
-            if student_context.get("career_path") and not session.get("career_path"):
-                session["career_path"] = student_context["career_path"]
+
+        if student_context and session_id:
+            session = sessions.get(session_id, {})
+            for field in ["name", "goal", "career_path", "short_term_goal", "long_term_goal"]:
+                if student_context.get(field) and not session.get(field):
+                    session[field] = student_context[field]
             sessions[session_id] = session
 
-        # Import the webhook handler logic
-        # We replicate the intent handling here to avoid circular calls
+        # Use Flask test request context to call webhook() directly — no HTTP round-trip
         import flask
         with app.test_request_context(
-            '/webhook',
-            method='POST',
+            "/webhook",
+            method="POST",
             json=data,
-            content_type='application/json'
+            content_type="application/json"
         ):
-            # Call webhook function directly
-            response = webhook()
-            return response
+            flask.g._learnpath_internal = True  # Flag so webhook knows it's internal
+            return webhook()
 
     except Exception as e:
-        return jsonify({"fulfillmentText": f"Error: {str(e)}"}), 500
+        print(f"_handle_webhook_logic error: {e}")
+        return jsonify({"fulfillmentText": "Sorry, something went wrong. Please try again."})
 
 
 @app.route("/debug-path", methods=["POST"])
