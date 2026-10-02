@@ -367,19 +367,33 @@ def webhook():
             sessions[session_id] = session
 
         if intent == "AskCareerPath":
-            if session.get("career_path"):
-                return jsonify({"fulfillmentText": session["career_path"]})
-            elif session.get("goal"):
+            # Check session first, then studentContext passed from frontend
+            career_path_stored = (session.get("career_path") or
+                                   student_context.get("career_path", ""))
+            name_stored = session.get("name","") or student_context.get("name","")
+
+            if career_path_stored:
+                # Already generated — return it
+                return jsonify({"fulfillmentText": career_path_stored})
+            elif session.get("scores"):
+                # Have scores but no path — generate now
                 career_path = generate_career_path(session)
                 session["career_path"] = career_path
-                sessions[session_id] = session
+                sessions[session_id]   = session
+                return jsonify({"fulfillmentText": career_path})
+            elif session.get("goal"):
+                # Have goal but no scores — generate with what we have
+                career_path = generate_career_path(session)
+                session["career_path"] = career_path
+                sessions[session_id]   = session
                 return jsonify({"fulfillmentText": career_path})
             else:
                 return jsonify({
                     "fulfillmentText": (
-                        "I don't have your profile yet. "
-                        "Please submit your details from the app first, "
-                        "or tell me your career goal to get started!"
+                        f"Hi{' '+name_stored if name_stored else ''}! "
+                        "I don't have your module scores yet. "
+                        "Please call /initialize with your scores first, "
+                        "then I can show you your personalized career path!"
                     )
                 })
 
@@ -462,6 +476,17 @@ def webhook():
             short_term = parameters.get("short_term_goal") or session.get("short_term_goal")
             long_term = parameters.get("long_term_goal") or session.get("long_term_goal")
 
+            # Extract goal from message text if Dialogflow parameters are empty
+            # e.g. "My goal is Chief Data Officer" → goal = "Chief Data Officer"
+            if not goal and query_text:
+                import re
+                goal_match = re.search(
+                    r"(?:my goal is|i want to be(?:come)?|goal[:\s]+)\s*(.+?)\s*$",
+                    query_text, re.IGNORECASE
+                )
+                if goal_match:
+                    goal = goal_match.group(1).strip()
+
             if session_id not in sessions:
                 sessions[session_id] = {}
 
@@ -514,6 +539,16 @@ def webhook():
             )
 
             return jsonify({"fulfillmentText": call_gemini(prompt)})
+
+        elif intent in ("Welcome", "Default Welcome Intent"):
+            name = session.get("name", "") or student_context.get("name", "")
+            return jsonify({
+                "fulfillmentText": (
+                    f"Hi{' ' + name if name else ''}! I'm your LearnPath AI advisor. "
+                    "Ask me about your career path, why a module is recommended, "
+                    "or if you can skip or swap a module. How can I help you today?"
+                )
+            })
 
         else:
             return jsonify({
@@ -630,20 +665,27 @@ def chat():
                     timeout=10  # Short timeout — we only need the intent name
                 )
                 df_data     = df_resp.json()
-                intent_name = (df_data
-                               .get("queryResult", {})
-                               .get("intent", {})
-                               .get("displayName", ""))
+                query_result_df = df_data.get("queryResult", {})
+                intent_name     = query_result_df.get("intent", {}).get("displayName", "")
+                df_parameters   = query_result_df.get("parameters", {})
 
-                print(f"Dialogflow detected intent: {intent_name}")
+                print(f"Dialogflow detected intent: {intent_name}, params: {df_parameters}")
+
+                # ── Apply override rules — correct known Dialogflow mistakes ──
+                corrected = _override_dialogflow_intent(intent_name, message)
+                if corrected != intent_name:
+                    print(f"Intent overridden: {intent_name} → {corrected}")
+                    intent_name = corrected
 
             except Exception as df_err:
                 print(f"Dialogflow intent detection failed: {df_err} — using local detection")
-                intent_name = None
+                intent_name  = None
+                df_parameters = {}
 
         # ── Step 2: Fall back to local intent detection if needed ──
         if not intent_name:
-            intent_name = _detect_intent_locally(message)
+            intent_name   = _detect_intent_locally(message)
+            df_parameters = {}
             print(f"Local intent detection: {intent_name}")
 
         # ── Step 3: Always call our own webhook logic directly ──
@@ -651,7 +693,7 @@ def chat():
         synthetic_request = {
             "queryResult": {
                 "intent":     {"displayName": intent_name},
-                "parameters": {},
+                "parameters": df_parameters if 'df_parameters' in dir() else {},
                 "queryText":  message
             },
             "session":        f"projects/learnpath/agent/sessions/{session_id}",
@@ -675,40 +717,112 @@ def chat():
 
 
 def _detect_intent_locally(message):
-    """Local intent detection — mirrors the HTML JS logic."""
-    lower = message.lower()
+    """
+    Comprehensive local intent detection.
+    Used as: (1) primary when no Dialogflow credentials,
+             (2) override when Dialogflow returns wrong/fallback intent.
+    Rules are ordered — first match wins.
+    """
+    lower = message.lower().strip()
+    import re
 
-    if any(p in lower for p in [
-        'career path', 'show my path', 'learning path',
-        'what should i study', 'study next', 'recommended path'
-    ]):
-        return 'AskCareerPath'
+    # ── Welcome / greeting ──
+    greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon',
+                 'good evening', 'namaste', 'hii', 'start', 'begin',
+                 'get started', 'help me', 'help']
+    if lower in greetings or any(lower == g for g in greetings):
+        return 'Welcome'
 
-    if any(p in lower for p in [
-        'alternative', 'skip', 'swap', 'instead',
-        'other option', 'can i take', 'replace', 'change the order'
-    ]):
+    # ── FillMissingInfo — student providing their goal or name ──
+    fill_patterns = [
+        r'my goal is', r'my career goal is', r'i want to be',
+        r'i want to become', r'i am aiming', r'goal is to become',
+        r'my name is', r'call me', r'i am [a-z]'
+    ]
+    if any(re.search(p, lower) for p in fill_patterns):
+        return 'FillMissingInfo'
+
+    # ── AskAlternative — skip / swap / optional ──
+    # Check BEFORE AskWhy because "can I skip" could match "why"
+    alt_keywords = [
+        'skip', 'swap', 'replace', 'alternative', 'instead',
+        'other option', 'can i take', 'change the order',
+        'is this optional', 'is this mandatory', 'is this compulsory',
+        'do i have to', 'do i need to', 'can i avoid',
+        'can i leave', 'can i move', 'can i postpone',
+        'can i do this later', "what if i don't",
+        'what happens if i skip', 'is this necessary'
+    ]
+    if any(k in lower for k in alt_keywords):
         return 'AskAlternative'
 
-    if any(p in lower for p in [
-        'why', 'how come', 'explain', 'inspite', 'despite',
-        'even though', 'above', 'below', 'before', 'after',
-        'first', 'last', 'placed', 'position', 'priority',
-        'ranked', 'sequence', 'order', 'recommend',
-        'higher', 'lower'
-    ]):
-        return 'AskWhy'
-
-    # Check if any module name is mentioned
-    module_names = [
+    # ── AskWhy — explanation of module placement ──
+    # Wide net: any question about reasoning, ordering, or a specific module
+    why_keywords = [
+        'why', 'how come', 'explain', 'reason',
+        'inspite', 'despite', 'even though', 'although',
+        'above', 'below', 'before', 'after',
+        'first', 'last', 'placed', 'position', 'ranked',
+        'sequence', 'order', 'priority', 'higher', 'lower',
+        'tell me about', 'what is', "what's"
+    ]
+    module_keywords = [
         'understanding digital', 'decoding digital', 'data driven',
         'building an intelligent', 'tech behind', 'digital transformation of',
-        'cybersecurity', 'risk compliance', 'connecting the dots', 'leadership'
+        'cybersecurity', 'risk compliance', 'connecting the dots',
+        'leadership', 'module'
     ]
-    if any(m in lower for m in module_names):
+    has_why     = any(k in lower for k in why_keywords)
+    has_module  = any(k in lower for k in module_keywords)
+    # "recommended" alone → AskWhy (not AskCareerPath)
+    has_recommended = 'recommended' in lower or 'recommend' in lower
+
+    if has_why or has_module or has_recommended:
         return 'AskWhy'
 
-    return 'AskWhy'  # Default to AskWhy rather than rejecting
+    # ── AskCareerPath — student wants to see their path ──
+    path_keywords = [
+        'career path', 'my path', 'show path', 'learning path',
+        'study plan', 'module sequence', 'show me my', 'what should i study',
+        'study next', 'my sequence', 'preparation plan', 'show modules',
+        'what order', 'my modules', 'give me my path', 'view my path'
+    ]
+    if any(k in lower for k in path_keywords):
+        return 'AskCareerPath'
+
+    # ── Default: AskWhy ──
+    # Better to try to explain something than to reject
+    return 'AskWhy'
+
+
+def _override_dialogflow_intent(dialogflow_intent, message):
+    """
+    Override Dialogflow's intent when we know it got it wrong.
+    Called after Dialogflow returns an intent — applies correction rules.
+    """
+    lower = message.lower()
+
+    # Rule 1: If Dialogflow says AskCareerPath but message has WHY → AskWhy
+    # (Dialogflow confuses "Why is X recommended?" with AskCareerPath)
+    if dialogflow_intent == 'AskCareerPath':
+        if any(k in lower for k in ['why', 'how come', 'explain', 'reason',
+                                     'inspite', 'despite', 'even though',
+                                     'tell me why', 'above', 'below', 'placed']):
+            return 'AskWhy'
+
+    # Rule 2: Default Fallback → try local detection
+    if dialogflow_intent in ('Default Fallback Intent', 'Default Fallback',
+                              '', None):
+        return _detect_intent_locally(message)
+
+    # Rule 3: If Dialogflow says Welcome but message is substantive → local detect
+    if dialogflow_intent == 'Welcome' and len(lower) > 10:
+        local = _detect_intent_locally(message)
+        if local != 'Welcome':
+            return local
+
+    # Dialogflow was correct — use its intent
+    return dialogflow_intent
 
 
 def _handle_webhook_logic(data):
